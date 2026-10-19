@@ -1,8 +1,10 @@
 blueprint:
-  name: IKEA STYRBAR E2313 — lampki KAJPLATS (Zigbee2MQTT)
+  name: IKEA STYRBAR E2313 — lampki z barwą i natężeniem (Zigbee2MQTT)
   description: >
-    Sterowanie grupą lampek IKEA KAJPLATS pilotem STYRBAR E2313
-    spiętym przez Zigbee2MQTT.
+    Sterowanie dowolnymi lampkami, które w Home Assistant obsługują natężenie
+    i barwę, pilotem STYRBAR E2313 spiętym przez Zigbee2MQTT.
+    Dotyczy to KAJPLATS i każdej innej lampki albo grupy z trybem
+    color_temp, hs, xy lub rgb. Akcje to zwykłe light.turn_on / light.turn_off.
 
     Pilot nie publikuje encji akcji. Automatyzacja nasłuchuje wyzwalaczy
     urządzenia MQTT typu action (payloady on, off, brightness_move_up,
@@ -11,12 +13,12 @@ blueprint:
     Krótkie kliknięcie ON włącza lampki, OFF je wyłącza.
     Przytrzymanie ON podnosi natężenie, przytrzymanie OFF je obniża,
     aż do puszczenia przycisku (brightness_stop).
-    Prawy przycisk przełącza trzy barwy ze skryptu przewijaka:
+    Prawy przycisk, gdy lampka ma i kolor, i temperaturę barwową, przełącza
     czerwony (HS 0/100) → biały ciepły (2600 K) → biały neutralny (3800 K).
-    Lewy przycisk przełącza pozostałe barwy: niebieski, zielony, żółty,
-    fioletowy, cyjan, magenta.
-    Aktualna barwa jest odczytywana z pierwszej wskazanej lampki
-    (albo z grupy, jeśli wskazano jedną encję grupy).
+    Lewy przycisk przełącza niebieski, zielony, żółty, fioletowy, cyjan i magenta.
+    Sama temperatura barwowa albo sam kolor HS dostaje ten sam układ,
+    wyrażony w trybie, który lampka obsługuje.
+    Aktualna barwa jest odczytywana ze wskazanej lampy wzorcowej.
   domain: automation
   author: Paweł
   source_url: https://github.com/rotherpawel/homeassistant-components/blob/main/blueprints/ikea_e2313_styrbar.yaml
@@ -41,12 +43,20 @@ blueprint:
         lights:
           name: Lampki
           description: >
-            Grupa albo lista lampek KAJPLATS. Pierwsza encja jest wzorcem
-            przy wyborze następnej barwy.
+            Dowolne lampki, grupa, urządzenie albo obszar. Encje muszą obsługiwać
+            natężenie oraz barwę (temperaturę barwową, kolor, albo oba).
+          selector:
+            target:
+              entity:
+                domain: light
+        color_light:
+          name: Lampa wzorcowa barwy
+          description: >
+            Encja, z której odczytywana jest aktualna barwa przed skokiem.
+            Wskaż grupę albo jedną z lampek objętych sterowaniem.
           selector:
             entity:
               domain: light
-              multiple: true
     dimming:
       name: Natężenie
       icon: mdi:brightness-6
@@ -78,7 +88,7 @@ mode: restart
 max_exceeded: silent
 
 variables:
-  light_ids: !input lights
+  color_light: !input color_light
   brightness_step: !input brightness_step
   step_interval_ms: !input step_interval
   max_steps: "{{ (100 / (brightness_step | float(10))) | round(0, 'ceil') | int + 1 }}"
@@ -134,16 +144,14 @@ actions:
             id: "on"
         sequence:
           - action: light.turn_on
-            target:
-              entity_id: !input lights
+            target: !input lights
 
       - conditions:
           - condition: trigger
             id: "off"
         sequence:
           - action: light.turn_off
-            target:
-              entity_id: !input lights
+            target: !input lights
 
       - conditions:
           - condition: trigger
@@ -153,8 +161,7 @@ actions:
               count: "{{ max_steps | int }}"
               sequence:
                 - action: light.turn_on
-                  target:
-                    entity_id: !input lights
+                  target: !input lights
                   data:
                     brightness_step_pct: "{{ brightness_step | int }}"
                 - delay:
@@ -170,12 +177,10 @@ actions:
                 - if:
                     - condition: template
                       value_template: >
-                        {% set ids = [light_ids] if light_ids is string else light_ids %}
-                        {{ ids | select('is_state', 'on') | list | count > 0 }}
+                        {{ is_state(color_light, 'on') }}
                   then:
                     - action: light.turn_on
-                      target:
-                        entity_id: !input lights
+                      target: !input lights
                       data:
                         brightness_step_pct: "{{ (brightness_step | int) * -1 }}"
                     - delay:
@@ -192,134 +197,148 @@ actions:
             id: color_right
         sequence:
           - variables:
-              color_ref: "{{ light_ids if light_ids is string else light_ids | first }}"
-              color_mode: "{{ state_attr(color_ref, 'color_mode') }}"
-              color_hue: "{{ state_attr(color_ref, 'hs_color')[0] | float(-1) if state_attr(color_ref, 'hs_color') else -1 }}"
-              color_sat: "{{ state_attr(color_ref, 'hs_color')[1] | float(0) if state_attr(color_ref, 'hs_color') else 0 }}"
-              color_kelvin: "{{ state_attr(color_ref, 'color_temp_kelvin') | float(0) }}"
-          - choose:
-              - conditions:
-                  - "{{ color_mode == 'hs' and (color_sat | float(0)) > 50 and ((color_hue | float(-1)) <= 15 or (color_hue | float(-1)) >= 345) }}"
-                sequence:
+              color_step: >
+                {% set modes = state_attr(color_light, 'supported_color_modes') or [] %}
+                {% set has_ct = 'color_temp' in modes %}
+                {% set has_hs = 'hs' in modes or 'xy' in modes or 'rgb' in modes or 'rgbw' in modes or 'rgbww' in modes %}
+                {% set mode = state_attr(color_light, 'color_mode') %}
+                {% set hs = state_attr(color_light, 'hs_color') %}
+                {% set kelvin = state_attr(color_light, 'color_temp_kelvin') | float(0) %}
+                {% set hue = hs[0] | float(-1) if hs else -1 %}
+                {% set sat = hs[1] | float(0) if hs else 0 %}
+                {% set is_red = mode == 'hs' and sat > 50 and (hue <= 15 or hue >= 345) %}
+                {% if has_ct and has_hs %}
+                  {% if is_red %}
+                    {{ 'ct|2600|32|50' }}
+                  {% elif mode == 'color_temp' and 0 < kelvin < 3200 %}
+                    {{ 'ct|3800|40|12' }}
+                  {% elif mode == 'color_temp' and kelvin >= 3200 %}
+                    {{ 'hs|2200|0|100' }}
+                  {% else %}
+                    {{ 'ct|2600|32|50' }}
+                  {% endif %}
+                {% elif has_ct %}
+                  {% if 0 < kelvin < 3200 %}
+                    {{ 'ct|3800|40|12' }}
+                  {% elif 3200 <= kelvin < 4500 %}
+                    {{ 'ct|5000|200|10' }}
+                  {% else %}
+                    {{ 'ct|2600|32|50' }}
+                  {% endif %}
+                {% else %}
+                  {% if is_red %}
+                    {{ 'hs|2600|32|50' }}
+                  {% elif 20 <= hue <= 55 and 15 <= sat <= 80 %}
+                    {{ 'hs|3800|40|12' }}
+                  {% elif mode == 'hs' and sat < 25 %}
+                    {{ 'hs|2200|0|100' }}
+                  {% else %}
+                    {{ 'hs|2600|32|50' }}
+                  {% endif %}
+                {% endif %}
+              kind: "{{ (color_step | trim).split('|')[0] }}"
+              kelvin: "{{ (color_step | trim).split('|')[1] }}"
+              hue: "{{ (color_step | trim).split('|')[2] }}"
+              sat: "{{ (color_step | trim).split('|')[3] }}"
+          - if:
+              - "{{ kind == 'ct' and 'color_temp' in (state_attr(color_light, 'supported_color_modes') or []) }}"
+            then:
+              - action: light.turn_on
+                target: !input lights
+                data:
+                  color_temp_kelvin: "{{ kelvin | int }}"
+            else:
+              - if:
+                  - "{{ 'hs' in (state_attr(color_light, 'supported_color_modes') or []) or 'xy' in (state_attr(color_light, 'supported_color_modes') or []) or 'rgb' in (state_attr(color_light, 'supported_color_modes') or []) or 'rgbw' in (state_attr(color_light, 'supported_color_modes') or []) or 'rgbww' in (state_attr(color_light, 'supported_color_modes') or []) }}"
+                then:
                   - action: light.turn_on
-                    target:
-                      entity_id: !input lights
-                    data:
-                      color_temp_kelvin: 2600
-              - conditions:
-                  - "{{ color_mode == 'color_temp' and (color_kelvin | float(0)) > 0 and (color_kelvin | float(0)) < 3200 }}"
-                sequence:
-                  - action: light.turn_on
-                    target:
-                      entity_id: !input lights
-                    data:
-                      color_temp_kelvin: 3800
-              - conditions:
-                  - "{{ color_mode == 'color_temp' and (color_kelvin | float(0)) >= 3200 }}"
-                sequence:
-                  - action: light.turn_on
-                    target:
-                      entity_id: !input lights
+                    target: !input lights
                     data:
                       hs_color:
-                        - 0
-                        - 100
-            default:
-              - action: light.turn_on
-                target:
-                  entity_id: !input lights
-                data:
-                  color_temp_kelvin: 2600
+                        - "{{ hue | int }}"
+                        - "{{ sat | int }}"
+                else:
+                  - action: light.turn_on
+                    target: !input lights
+                    data:
+                      color_temp_kelvin: "{{ kelvin | int }}"
 
       - conditions:
           - condition: trigger
             id: color_left
         sequence:
           - variables:
-              color_ref: "{{ light_ids if light_ids is string else light_ids | first }}"
-              left_index: >
+              color_step: >
+                {% set modes = state_attr(color_light, 'supported_color_modes') or [] %}
+                {% set has_hs = 'hs' in modes or 'xy' in modes or 'rgb' in modes or 'rgbw' in modes or 'rgbww' in modes %}
                 {% set hues = [240, 120, 60, 280, 180, 300] %}
-                {% set mode = state_attr(color_ref, 'color_mode') %}
-                {% set hs = state_attr(color_ref, 'hs_color') %}
-                {% if mode != 'hs' or hs is none %}
-                  {{ 0 }}
-                {% else %}
-                  {% set h = hs[0] | float(0) %}
-                  {% set sat = hs[1] | float(0) %}
-                  {% if sat < 40 or h <= 20 or h >= 345 %}
-                    {{ 0 }}
+                {% set hue_kelvins = [6500, 4500, 3500, 4000, 5500, 3000] %}
+                {% if has_hs %}
+                  {% set mode = state_attr(color_light, 'color_mode') %}
+                  {% set hs = state_attr(color_light, 'hs_color') %}
+                  {% if mode != 'hs' or hs is none %}
+                    {{ 'hs|' ~ hue_kelvins[0] ~ '|' ~ hues[0] ~ '|100' }}
                   {% else %}
-                    {% set ns = namespace(best=0, dist=999) %}
-                    {% for i in range(hues | length) %}
-                      {% set d = [((h - hues[i]) | abs), (360 - ((h - hues[i]) | abs))] | min %}
-                      {% if d < ns.dist %}
-                        {% set ns.best = i %}
-                        {% set ns.dist = d %}
-                      {% endif %}
-                    {% endfor %}
-                    {% if ns.dist > 25 %}
-                      {{ 0 }}
+                    {% set h = hs[0] | float(0) %}
+                    {% set sat = hs[1] | float(0) %}
+                    {% if sat < 40 or h <= 20 or h >= 345 %}
+                      {{ 'hs|' ~ hue_kelvins[0] ~ '|' ~ hues[0] ~ '|100' }}
                     {% else %}
-                      {{ (ns.best + 1) % (hues | length) }}
+                      {% set ns = namespace(best=0, dist=999) %}
+                      {% for i in range(hues | length) %}
+                        {% set d = [((h - hues[i]) | abs), (360 - ((h - hues[i]) | abs))] | min %}
+                        {% if d < ns.dist %}
+                          {% set ns.best = i %}
+                          {% set ns.dist = d %}
+                        {% endif %}
+                      {% endfor %}
+                      {% if ns.dist > 25 %}
+                        {{ 'hs|' ~ hue_kelvins[0] ~ '|' ~ hues[0] ~ '|100' }}
+                      {% else %}
+                        {{ 'hs|' ~ hue_kelvins[(ns.best + 1) % (hues | length)] ~ '|' ~ hues[(ns.best + 1) % (hues | length)] ~ '|100' }}
+                      {% endif %}
                     {% endif %}
                   {% endif %}
+                {% else %}
+                  {% set temps = [2200, 3000, 4500, 5500, 6500] %}
+                  {% set kelvin = state_attr(color_light, 'color_temp_kelvin') | float(0) %}
+                  {% set ns = namespace(best=0, dist=99999) %}
+                  {% for i in range(temps | length) %}
+                    {% set d = (kelvin - temps[i]) | abs %}
+                    {% if d < ns.dist %}
+                      {% set ns.best = i %}
+                      {% set ns.dist = d %}
+                    {% endif %}
+                  {% endfor %}
+                  {% if kelvin <= 0 or ns.dist > 400 %}
+                    {{ 'ct|' ~ temps[0] ~ '|32|40' }}
+                  {% else %}
+                    {{ 'ct|' ~ temps[(ns.best + 1) % (temps | length)] ~ '|32|40' }}
+                  {% endif %}
                 {% endif %}
-          - choose:
-              - conditions:
-                  - "{{ left_index | trim | int(0) == 0 }}"
-                sequence:
-                  - action: light.turn_on
-                    target:
-                      entity_id: !input lights
-                    data:
-                      hs_color:
-                        - 240
-                        - 100
-              - conditions:
-                  - "{{ left_index | trim | int(0) == 1 }}"
-                sequence:
-                  - action: light.turn_on
-                    target:
-                      entity_id: !input lights
-                    data:
-                      hs_color:
-                        - 120
-                        - 100
-              - conditions:
-                  - "{{ left_index | trim | int(0) == 2 }}"
-                sequence:
-                  - action: light.turn_on
-                    target:
-                      entity_id: !input lights
-                    data:
-                      hs_color:
-                        - 60
-                        - 100
-              - conditions:
-                  - "{{ left_index | trim | int(0) == 3 }}"
-                sequence:
-                  - action: light.turn_on
-                    target:
-                      entity_id: !input lights
-                    data:
-                      hs_color:
-                        - 280
-                        - 100
-              - conditions:
-                  - "{{ left_index | trim | int(0) == 4 }}"
-                sequence:
-                  - action: light.turn_on
-                    target:
-                      entity_id: !input lights
-                    data:
-                      hs_color:
-                        - 180
-                        - 100
-            default:
+              kind: "{{ (color_step | trim).split('|')[0] }}"
+              kelvin: "{{ (color_step | trim).split('|')[1] }}"
+              hue: "{{ (color_step | trim).split('|')[2] }}"
+              sat: "{{ (color_step | trim).split('|')[3] }}"
+          - if:
+              - "{{ kind == 'ct' and 'color_temp' in (state_attr(color_light, 'supported_color_modes') or []) }}"
+            then:
               - action: light.turn_on
-                target:
-                  entity_id: !input lights
+                target: !input lights
                 data:
-                  hs_color:
-                    - 300
-                    - 100
+                  color_temp_kelvin: "{{ kelvin | int }}"
+            else:
+              - if:
+                  - "{{ 'hs' in (state_attr(color_light, 'supported_color_modes') or []) or 'xy' in (state_attr(color_light, 'supported_color_modes') or []) or 'rgb' in (state_attr(color_light, 'supported_color_modes') or []) or 'rgbw' in (state_attr(color_light, 'supported_color_modes') or []) or 'rgbww' in (state_attr(color_light, 'supported_color_modes') or []) }}"
+                then:
+                  - action: light.turn_on
+                    target: !input lights
+                    data:
+                      hs_color:
+                        - "{{ hue | int }}"
+                        - "{{ sat | int }}"
+                else:
+                  - action: light.turn_on
+                    target: !input lights
+                    data:
+                      color_temp_kelvin: "{{ kelvin | int }}"
