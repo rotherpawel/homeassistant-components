@@ -16,9 +16,12 @@ blueprint:
     Prawy przycisk, gdy lampka ma i kolor, i temperaturę barwową, przełącza
     czerwony (HS 0/100) → biały ciepły (2600 K) → biały neutralny (3800 K).
     Lewy przycisk przełącza niebieski, zielony, żółty, fioletowy, cyjan i magenta.
+    Kolejność lewego przycisku jest trzymana w input_number, bo część lampek
+    (w tym KAJPLATS) zgłasza nasycenie bliskie bieli i z samego odczytu
+    nie da się poznać, który kolor był poprzedni.
     Sama temperatura barwowa albo sam kolor HS dostaje ten sam układ,
     wyrażony w trybie, który lampka obsługuje.
-    Aktualna barwa jest odczytywana ze wskazanej lampy wzorcowej.
+    Aktualna barwa prawego przycisku jest odczytywana ze wskazanej lampy wzorcowej.
   domain: automation
   author: Paweł
   source_url: https://github.com/rotherpawel/homeassistant-components/blob/main/blueprints/ikea_e2313_styrbar.yaml
@@ -57,6 +60,14 @@ blueprint:
           selector:
             entity:
               domain: light
+        left_color_index:
+          name: Indeks koloru lewego przycisku
+          description: >
+            Helper input_number od 0 do 5, krok 1. Blueprint zapisuje w nim,
+            który kolor lewego przycisku jest następny.
+          selector:
+            entity:
+              domain: input_number
     dimming:
       name: Natężenie
       icon: mdi:brightness-6
@@ -89,6 +100,7 @@ max_exceeded: silent
 
 variables:
   color_light: !input color_light
+  left_color_index_entity: !input left_color_index
   brightness_step: !input brightness_step
   step_interval_ms: !input step_interval
   max_steps: "{{ (100 / (brightness_step | float(10))) | round(0, 'ceil') | int + 1 }}"
@@ -267,78 +279,65 @@ actions:
           - condition: trigger
             id: color_left
         sequence:
+          - delay:
+              milliseconds: 100
           - variables:
-              color_step: >
-                {% set modes = state_attr(color_light, 'supported_color_modes') or [] %}
-                {% set has_hs = 'hs' in modes or 'xy' in modes or 'rgb' in modes or 'rgbw' in modes or 'rgbww' in modes %}
-                {% set hues = [240, 120, 60, 280, 180, 300] %}
-                {% set hue_kelvins = [6500, 4500, 3500, 4000, 5500, 3000] %}
-                {% if has_hs %}
-                  {% set mode = state_attr(color_light, 'color_mode') %}
-                  {% set hs = state_attr(color_light, 'hs_color') %}
-                  {% if mode != 'hs' or hs is none %}
-                    {{ 'hs|' ~ hue_kelvins[0] ~ '|' ~ hues[0] ~ '|100' }}
-                  {% else %}
-                    {% set h = hs[0] | float(0) %}
-                    {% set sat = hs[1] | float(0) %}
-                    {% if sat < 40 or h <= 20 or h >= 345 %}
-                      {{ 'hs|' ~ hue_kelvins[0] ~ '|' ~ hues[0] ~ '|100' }}
-                    {% else %}
-                      {% set ns = namespace(best=0, dist=999) %}
-                      {% for i in range(hues | length) %}
-                        {% set d = [((h - hues[i]) | abs), (360 - ((h - hues[i]) | abs))] | min %}
-                        {% if d < ns.dist %}
-                          {% set ns.best = i %}
-                          {% set ns.dist = d %}
-                        {% endif %}
-                      {% endfor %}
-                      {% if ns.dist > 25 %}
-                        {{ 'hs|' ~ hue_kelvins[0] ~ '|' ~ hues[0] ~ '|100' }}
-                      {% else %}
-                        {{ 'hs|' ~ hue_kelvins[(ns.best + 1) % (hues | length)] ~ '|' ~ hues[(ns.best + 1) % (hues | length)] ~ '|100' }}
-                      {% endif %}
-                    {% endif %}
-                  {% endif %}
-                {% else %}
-                  {% set temps = [2200, 3000, 4500, 5500, 6500] %}
-                  {% set kelvin = state_attr(color_light, 'color_temp_kelvin') | float(0) %}
-                  {% set ns = namespace(best=0, dist=99999) %}
-                  {% for i in range(temps | length) %}
-                    {% set d = (kelvin - temps[i]) | abs %}
-                    {% if d < ns.dist %}
-                      {% set ns.best = i %}
-                      {% set ns.dist = d %}
-                    {% endif %}
-                  {% endfor %}
-                  {% if kelvin <= 0 or ns.dist > 400 %}
-                    {{ 'ct|' ~ temps[0] ~ '|32|40' }}
-                  {% else %}
-                    {{ 'ct|' ~ temps[(ns.best + 1) % (temps | length)] ~ '|32|40' }}
-                  {% endif %}
-                {% endif %}
-              kind: "{{ (color_step | trim).split('|')[0] }}"
-              kelvin: "{{ (color_step | trim).split('|')[1] }}"
-              hue: "{{ (color_step | trim).split('|')[2] }}"
-              sat: "{{ (color_step | trim).split('|')[3] }}"
-          - if:
-              - "{{ kind == 'ct' and 'color_temp' in (state_attr(color_light, 'supported_color_modes') or []) }}"
-            then:
-              - action: light.turn_on
-                target: !input lights
-                data:
-                  color_temp_kelvin: "{{ kelvin | int }}"
-            else:
-              - if:
-                  - "{{ 'hs' in (state_attr(color_light, 'supported_color_modes') or []) or 'xy' in (state_attr(color_light, 'supported_color_modes') or []) or 'rgb' in (state_attr(color_light, 'supported_color_modes') or []) or 'rgbw' in (state_attr(color_light, 'supported_color_modes') or []) or 'rgbww' in (state_attr(color_light, 'supported_color_modes') or []) }}"
-                then:
+              color_index: "{{ states(left_color_index_entity) | int(0) % 6 }}"
+          - choose:
+              - conditions:
+                  - "{{ color_index | int(0) == 0 }}"
+                sequence:
                   - action: light.turn_on
                     target: !input lights
                     data:
                       hs_color:
-                        - "{{ hue | int }}"
-                        - "{{ sat | int }}"
-                else:
+                        - 240
+                        - 100
+              - conditions:
+                  - "{{ color_index | int(0) == 1 }}"
+                sequence:
                   - action: light.turn_on
                     target: !input lights
                     data:
-                      color_temp_kelvin: "{{ kelvin | int }}"
+                      hs_color:
+                        - 120
+                        - 100
+              - conditions:
+                  - "{{ color_index | int(0) == 2 }}"
+                sequence:
+                  - action: light.turn_on
+                    target: !input lights
+                    data:
+                      hs_color:
+                        - 60
+                        - 100
+              - conditions:
+                  - "{{ color_index | int(0) == 3 }}"
+                sequence:
+                  - action: light.turn_on
+                    target: !input lights
+                    data:
+                      hs_color:
+                        - 280
+                        - 100
+              - conditions:
+                  - "{{ color_index | int(0) == 4 }}"
+                sequence:
+                  - action: light.turn_on
+                    target: !input lights
+                    data:
+                      hs_color:
+                        - 180
+                        - 100
+            default:
+              - action: light.turn_on
+                target: !input lights
+                data:
+                  hs_color:
+                    - 300
+                    - 100
+          - action: input_number.set_value
+            target:
+              entity_id: !input left_color_index
+            data:
+              value: "{{ (color_index | int(0) + 1) % 6 }}"
