@@ -1,0 +1,325 @@
+blueprint:
+  name: IKEA STYRBAR E2313 — lampki KAJPLATS (Zigbee2MQTT)
+  description: >
+    Sterowanie grupą lampek IKEA KAJPLATS pilotem STYRBAR E2313
+    spiętym przez Zigbee2MQTT.
+
+    Pilot nie publikuje encji akcji. Automatyzacja nasłuchuje wyzwalaczy
+    urządzenia MQTT typu action (payloady on, off, brightness_move_up,
+    brightness_move_down, brightness_stop, arrow_left_click, arrow_right_click).
+
+    Krótkie kliknięcie ON włącza lampki, OFF je wyłącza.
+    Przytrzymanie ON podnosi natężenie, przytrzymanie OFF je obniża,
+    aż do puszczenia przycisku (brightness_stop).
+    Prawy przycisk przełącza trzy barwy ze skryptu przewijaka:
+    czerwony (HS 0/100) → biały ciepły (2600 K) → biały neutralny (3800 K).
+    Lewy przycisk przełącza pozostałe barwy: niebieski, zielony, żółty,
+    fioletowy, cyjan, magenta.
+    Aktualna barwa jest odczytywana z pierwszej wskazanej lampki
+    (albo z grupy, jeśli wskazano jedną encję grupy).
+  domain: automation
+  author: Paweł
+  source_url: https://github.com/rotherpawel/homeassistant-components/blob/main/blueprints/ikea_e2313_styrbar.yaml
+  homeassistant:
+    min_version: "2024.10.0"
+  input:
+    devices:
+      name: Urządzenia
+      icon: mdi:remote
+      input:
+        remote:
+          name: Pilot STYRBAR E2313
+          description: >
+            Pilot IKEA STYRBAR dodany przez Zigbee2MQTT.
+            Wyzwalacze to akcje MQTT tego urządzenia.
+          selector:
+            device:
+              filter:
+                - integration: mqtt
+                  manufacturer: IKEA
+                  model: STYRBAR remote control
+        lights:
+          name: Lampki
+          description: >
+            Grupa albo lista lampek KAJPLATS. Pierwsza encja jest wzorcem
+            przy wyborze następnej barwy.
+          selector:
+            entity:
+              domain: light
+              multiple: true
+    dimming:
+      name: Natężenie
+      icon: mdi:brightness-6
+      input:
+        brightness_step:
+          name: Skok natężenia
+          description: O ile procent zmieniać jasność przy każdym kroku przytrzymania.
+          default: 10
+          selector:
+            number:
+              min: 1
+              max: 50
+              step: 1
+              unit_of_measurement: "%"
+              mode: slider
+        step_interval:
+          name: Odstęp między krokami
+          description: Co ile milisekund wykonywać kolejny skok, dopóki przycisk jest przytrzymany.
+          default: 250
+          selector:
+            number:
+              min: 50
+              max: 2000
+              step: 50
+              unit_of_measurement: ms
+              mode: box
+
+mode: restart
+max_exceeded: silent
+
+variables:
+  light_ids: !input lights
+  brightness_step: !input brightness_step
+  step_interval_ms: !input step_interval
+  max_steps: "{{ (100 / (brightness_step | float(10))) | round(0, 'ceil') | int + 1 }}"
+
+triggers:
+  - trigger: device
+    device_id: !input remote
+    domain: mqtt
+    type: action
+    subtype: "on"
+    id: "on"
+  - trigger: device
+    device_id: !input remote
+    domain: mqtt
+    type: action
+    subtype: "off"
+    id: "off"
+  - trigger: device
+    device_id: !input remote
+    domain: mqtt
+    type: action
+    subtype: brightness_move_up
+    id: dim_up
+  - trigger: device
+    device_id: !input remote
+    domain: mqtt
+    type: action
+    subtype: brightness_move_down
+    id: dim_down
+  - trigger: device
+    device_id: !input remote
+    domain: mqtt
+    type: action
+    subtype: brightness_stop
+    id: dim_stop
+  - trigger: device
+    device_id: !input remote
+    domain: mqtt
+    type: action
+    subtype: arrow_right_click
+    id: color_right
+  - trigger: device
+    device_id: !input remote
+    domain: mqtt
+    type: action
+    subtype: arrow_left_click
+    id: color_left
+
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: "on"
+        sequence:
+          - action: light.turn_on
+            target:
+              entity_id: !input lights
+
+      - conditions:
+          - condition: trigger
+            id: "off"
+        sequence:
+          - action: light.turn_off
+            target:
+              entity_id: !input lights
+
+      - conditions:
+          - condition: trigger
+            id: dim_up
+        sequence:
+          - repeat:
+              count: "{{ max_steps | int }}"
+              sequence:
+                - action: light.turn_on
+                  target:
+                    entity_id: !input lights
+                  data:
+                    brightness_step_pct: "{{ brightness_step | int }}"
+                - delay:
+                    milliseconds: "{{ step_interval_ms | int }}"
+
+      - conditions:
+          - condition: trigger
+            id: dim_down
+        sequence:
+          - repeat:
+              count: "{{ max_steps | int }}"
+              sequence:
+                - if:
+                    - condition: template
+                      value_template: >
+                        {% set ids = [light_ids] if light_ids is string else light_ids %}
+                        {{ ids | select('is_state', 'on') | list | count > 0 }}
+                  then:
+                    - action: light.turn_on
+                      target:
+                        entity_id: !input lights
+                      data:
+                        brightness_step_pct: "{{ (brightness_step | int) * -1 }}"
+                    - delay:
+                        milliseconds: "{{ step_interval_ms | int }}"
+
+      - conditions:
+          - condition: trigger
+            id: dim_stop
+        sequence:
+          - stop: "Puszczenie przycisku kończy zmianę natężenia"
+
+      - conditions:
+          - condition: trigger
+            id: color_right
+        sequence:
+          - variables:
+              color_ref: "{{ light_ids if light_ids is string else light_ids | first }}"
+              color_mode: "{{ state_attr(color_ref, 'color_mode') }}"
+              color_hue: "{{ state_attr(color_ref, 'hs_color')[0] | float(-1) if state_attr(color_ref, 'hs_color') else -1 }}"
+              color_sat: "{{ state_attr(color_ref, 'hs_color')[1] | float(0) if state_attr(color_ref, 'hs_color') else 0 }}"
+              color_kelvin: "{{ state_attr(color_ref, 'color_temp_kelvin') | float(0) }}"
+          - choose:
+              - conditions:
+                  - "{{ color_mode == 'hs' and (color_sat | float(0)) > 50 and ((color_hue | float(-1)) <= 15 or (color_hue | float(-1)) >= 345) }}"
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input lights
+                    data:
+                      color_temp_kelvin: 2600
+              - conditions:
+                  - "{{ color_mode == 'color_temp' and (color_kelvin | float(0)) > 0 and (color_kelvin | float(0)) < 3200 }}"
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input lights
+                    data:
+                      color_temp_kelvin: 3800
+              - conditions:
+                  - "{{ color_mode == 'color_temp' and (color_kelvin | float(0)) >= 3200 }}"
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input lights
+                    data:
+                      hs_color:
+                        - 0
+                        - 100
+            default:
+              - action: light.turn_on
+                target:
+                  entity_id: !input lights
+                data:
+                  color_temp_kelvin: 2600
+
+      - conditions:
+          - condition: trigger
+            id: color_left
+        sequence:
+          - variables:
+              color_ref: "{{ light_ids if light_ids is string else light_ids | first }}"
+              left_index: >
+                {% set hues = [240, 120, 60, 280, 180, 300] %}
+                {% set mode = state_attr(color_ref, 'color_mode') %}
+                {% set hs = state_attr(color_ref, 'hs_color') %}
+                {% if mode != 'hs' or hs is none %}
+                  {{ 0 }}
+                {% else %}
+                  {% set h = hs[0] | float(0) %}
+                  {% set sat = hs[1] | float(0) %}
+                  {% if sat < 40 or h <= 20 or h >= 345 %}
+                    {{ 0 }}
+                  {% else %}
+                    {% set ns = namespace(best=0, dist=999) %}
+                    {% for i in range(hues | length) %}
+                      {% set d = [((h - hues[i]) | abs), (360 - ((h - hues[i]) | abs))] | min %}
+                      {% if d < ns.dist %}
+                        {% set ns.best = i %}
+                        {% set ns.dist = d %}
+                      {% endif %}
+                    {% endfor %}
+                    {% if ns.dist > 25 %}
+                      {{ 0 }}
+                    {% else %}
+                      {{ (ns.best + 1) % (hues | length) }}
+                    {% endif %}
+                  {% endif %}
+                {% endif %}
+          - choose:
+              - conditions:
+                  - "{{ left_index | trim | int(0) == 0 }}"
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input lights
+                    data:
+                      hs_color:
+                        - 240
+                        - 100
+              - conditions:
+                  - "{{ left_index | trim | int(0) == 1 }}"
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input lights
+                    data:
+                      hs_color:
+                        - 120
+                        - 100
+              - conditions:
+                  - "{{ left_index | trim | int(0) == 2 }}"
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input lights
+                    data:
+                      hs_color:
+                        - 60
+                        - 100
+              - conditions:
+                  - "{{ left_index | trim | int(0) == 3 }}"
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input lights
+                    data:
+                      hs_color:
+                        - 280
+                        - 100
+              - conditions:
+                  - "{{ left_index | trim | int(0) == 4 }}"
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input lights
+                    data:
+                      hs_color:
+                        - 180
+                        - 100
+            default:
+              - action: light.turn_on
+                target:
+                  entity_id: !input lights
+                data:
+                  hs_color:
+                    - 300
+                    - 100
